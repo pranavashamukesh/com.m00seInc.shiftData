@@ -1,0 +1,39 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="512dp"
+    android:height="512dp"
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+
+    <!-- The Base Pillowed Circle (Neumorphic) -->
+    <path
+        android:pathData="M256,256m-200,0a200,200 0,1 1,400 0a200,200 0,1 1,-400 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="56"
+                android:startY="56"
+                android:endX="456"
+                android:endY="456"
+                android:type="linear">
+                <item android:offset="0" android:color="#FFFFFFFF" />
+                <item android:offset="1" android:color="#FFE0E5EC" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Embossed Data Arrows (Shadow/Depth layer) -->
+    <path
+        android:strokeWidth="14"
+        android:strokeColor="#1A000000"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M210,210l30,-30l30,30 M240,180v150 M322,302l-30,30l-30,-30 M292,332V182" />
+
+    <!-- Main Data Arrows (Highlight/Surface layer) -->
+    <path
+        android:strokeWidth="14"
+        android:strokeColor="#FFA0A5AB"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M208,208l30,-30l30,30 M238,178v150 M320,300l-30,30l-30,-30 M290,330V180" />
+</vector>
