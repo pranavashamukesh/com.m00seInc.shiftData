@@ -19,3 +19,9 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+# Strip out all Debug and Verbose logging statements in the release build
+-assumenosideeffects class android.util.Log {
+    public static int d(...);
+    public static int v(...);
+    public static boolean isLoggable(java.lang.String, int);
+}

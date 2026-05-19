@@ -147,12 +147,12 @@ class DataSwitchService : Service() {
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             isMobileDataEnabled = true
-            Log.d("gBars_Network", "Cellular Data Available")
+            Log.d("ShiftData_LeakCheck", "[Instance:${this@DataSwitchService.hashCode()}] Callback -> Cellular Data Available")
         }
 
         override fun onLost(network: Network) {
             isMobileDataEnabled = false
-            Log.d("gBars_Network", "Cellular Data Lost/Disabled")
+            Log.d("ShiftData_LeakCheck", "[Instance:${this@DataSwitchService.hashCode()}] Callback -> Cellular Data Lost/Disabled")
         }
     }
 
@@ -172,6 +172,9 @@ class DataSwitchService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        Log.d("ShiftData_LeakCheck", "==================================================")
+        Log.d("ShiftData_LeakCheck", "[Instance:${this.hashCode()}] onCreate() initialized")
+        Log.d("ShiftData_LeakCheck", "==================================================")
         // Cache the system services once!
         telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
         powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -259,23 +262,35 @@ class DataSwitchService : Service() {
     }
 
     override fun onDestroy() {
-        isRunning =
-            false
+        isRunning = false
+        val instanceId = this.hashCode()
+
+        Log.d("ShiftData_LeakCheck", "==================================================")
+        Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] onDestroy() triggered. Starting teardown...")
+        Log.d("ShiftData_LeakCheck", "==================================================")
+
         unregisterScreenReceiver()
         try {
+            Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Attempting Audio Callback unregistration...")
             if (::audioManager.isInitialized) {
                 audioManager.unregisterAudioPlaybackCallback(audioPlaybackCallback)
             }
+            Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Audio Callback unregistered successfully.")
+
+            Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Attempting Phone State Receiver unregistration...")
             unregisterReceiver(phoneStateReceiver)
+            Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Phone State Receiver unregistered successfully.")
 
+            Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Attempting Hotspot Receiver unregistration...")
             unregisterReceiver(hotspotReceiver)
+            Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Hotspot Receiver unregistered successfully.")
 
+            Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Attempting Network Callback unregistration...")
             connectivityManager.unregisterNetworkCallback(networkCallback)
-
-            //contentResolver.unregisterContentObserver(mobileDataObserver)
+            Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Network Callback unregistered successfully.")
 
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e("ShiftData_LeakCheck", "[Instance:$instanceId] CRITICAL TEARDOWN FAILURE! Chain broken.", e)
         }
 
         updateUI()
@@ -291,8 +306,12 @@ class DataSwitchService : Service() {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 when (intent.action) {
-                    Intent.ACTION_SCREEN_OFF -> shiftMobileData(false)
-                    Intent.ACTION_SCREEN_ON -> shiftMobileData(true)
+                    Intent.ACTION_SCREEN_OFF -> {
+                        Log.d("ShiftData_Lifecycle", "[HARDWARE] 🔒 Phone Locked (SCREEN_OFF)")
+                        shiftMobileData(false)}
+                    Intent.ACTION_SCREEN_ON -> {
+                        Log.d("ShiftData_Lifecycle", "[HARDWARE] 🔓 Phone Unlocked (SCREEN_ON)")
+                        shiftMobileData(true)}
                 }
             }
         }
@@ -455,7 +474,7 @@ class DataSwitchService : Service() {
 
         // 3. Attach it to the notification builder
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentText("ACTIVE - v3.0.4 \\ STABLE")
+            .setContentText("ACTIVE - v3.0.4.1 \\ STABLE")
             .setSmallIcon(R.drawable.ic_stat_shiftdata)
             .setContentIntent(pendingIntent) // <--- THIS MAKES IT CLICKABLE
             .setPriority(NotificationCompat.PRIORITY_LOW)
