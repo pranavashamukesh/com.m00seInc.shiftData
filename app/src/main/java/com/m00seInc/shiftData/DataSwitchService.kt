@@ -61,23 +61,48 @@ class DataSwitchService : Service() {
     private var isCallActiveLocally = false
     private val audioPlaybackCallback = object : AudioManager.AudioPlaybackCallback() {
         override fun onPlaybackConfigChanged(configs: List<AudioPlaybackConfiguration>) {
-            // We use the callback as a trigger. This only pings the hardware
-            // when the system explicitly tells us the audio state has changed.
+            var mediaActive = false
+            var voipActive = false
 
-            if (configs.isEmpty()) {
-                isMediaPlayingLocally = false
-                Log.d(
-                    "DataSwitchService",
-                    "Call condition: Media=$isMediaPlayingLocally"
-                )
-            } else {
-                isMediaPlayingLocally = true
-                Log.d(
-                    "DataSwitchService",
-                    "Media condition: Media=$isMediaPlayingLocally"
-                )
+            configs.forEach { config ->
+                val attrs = config.audioAttributes
+                when (attrs.usage) {
+                    // Entertainment & Gaming streams
+                    android.media.AudioAttributes.USAGE_MEDIA -> {
+                        // STRICT FILTER: Ensure it is a valid long-form entertainment stream
+                        val contentType = attrs.contentType
+                        if (contentType == android.media.AudioAttributes.CONTENT_TYPE_MUSIC ||
+                            contentType == android.media.AudioAttributes.CONTENT_TYPE_MOVIE ||
+                            contentType == android.media.AudioAttributes.CONTENT_TYPE_SPEECH) {
+                            mediaActive = true
+                        }
+                    }
+
+                    android.media.AudioAttributes.USAGE_GAME -> {
+                        mediaActive = true
+                    }
+
+                    // VoIP voice/video communication streams (WhatsApp, Signal, Zoom, Teams)
+                    android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION,
+                    android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION_SIGNALLING -> {
+                        voipActive = true
+                    }
+                }
             }
 
+            // Detect state changes for logging
+            val wasMediaPlaying = isMediaPlayingLocally
+            val wasVoipActive = isVoipCallActiveLocally
+
+            isMediaPlayingLocally = mediaActive
+            isVoipCallActiveLocally = voipActive
+
+            if (wasMediaPlaying != isMediaPlayingLocally) {
+                Log.d("DataSwitchService", "Audio Evaluator -> Media Track State Active: $isMediaPlayingLocally")
+            }
+            if (wasVoipActive != isVoipCallActiveLocally) {
+                Log.d("DataSwitchService", "Audio Evaluator -> VoIP Call State Active: $isVoipCallActiveLocally")
+            }
         }
     }
 
@@ -122,6 +147,7 @@ class DataSwitchService : Service() {
     }
 
     private var isMobileDataEnabled = false
+    private var isVoipCallActiveLocally = false
 
     /*private lateinit var connectivityManager: ConnectivityManager
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -215,8 +241,33 @@ class DataSwitchService : Service() {
             audioPlaybackCallback,
             Handler(Looper.getMainLooper())
         )
-        // Initial sync so the RAM state is correct at boot
-        isMediaPlayingLocally = audioManager.isMusicActive
+
+        val bootConfigs = audioManager.activePlaybackConfigurations
+        var bootMediaActive = false
+        var bootVoipActive = false
+
+        bootConfigs.forEach { config ->
+            when (config.audioAttributes.usage) {
+                android.media.AudioAttributes.USAGE_MEDIA,
+                android.media.AudioAttributes.USAGE_GAME -> {
+                    bootMediaActive = true
+                }
+                android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION,
+                android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION_SIGNALLING -> {
+                    bootVoipActive = true
+                }
+            }
+        }
+
+        // Apply findings with a safety fallback for music trackers
+        isMediaPlayingLocally = bootMediaActive || audioManager.isMusicActive
+        isVoipCallActiveLocally = bootVoipActive
+
+        Log.d(
+            "DataSwitchService",
+            "Boot Audio Table Sync Completed -> Legitimate Media: $isMediaPlayingLocally | Legitimate VoIP: $isVoipCallActiveLocally"
+        )
+
         // Initial sync
         // Register the Phone State Receiver
         val filter = IntentFilter(TelephonyManager.ACTION_PHONE_STATE_CHANGED)
@@ -460,7 +511,7 @@ class DataSwitchService : Service() {
 
     private fun isHotspotActive(): Boolean = isHotspotActiveLocally
 
-    private fun isCallActive(): Boolean = isCallActiveLocally
+    private fun isCallActive(): Boolean = isCallActiveLocally || isVoipCallActiveLocally
 
     private fun isMediaPlaying(): Boolean = isMediaPlayingLocally
 
@@ -523,7 +574,7 @@ class DataSwitchService : Service() {
 
         // 3. Attach it to the notification builder
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentText("ACTIVE - v3.0.5 \\ STABLE")
+            .setContentText("ACTIVE - v3.0.5.5 \\ STABLE")
             .setSmallIcon(R.drawable.ic_stat_shiftdata)
             .setContentIntent(pendingIntent) // <--- THIS MAKES IT CLICKABLE
             .setPriority(NotificationCompat.PRIORITY_LOW)
