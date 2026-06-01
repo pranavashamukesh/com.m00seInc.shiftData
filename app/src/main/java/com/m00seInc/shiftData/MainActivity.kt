@@ -194,7 +194,7 @@ fun ShiftDataScreen(context: Context, hasNotifyPerm: Boolean, hasSecureSettings:
                 Column(modifier = Modifier.weight(1f).fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally) {
                     Column(Modifier.fillMaxWidth()) {
                         Text("shiftData", letterSpacing = 4.sp, fontWeight = FontWeight.Black, fontSize = 12.sp)
-                        Text("v3.0.5.5 / STABLE", color = Color.Gray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                        Text("v3.0.6 / STABLE", color = Color.Gray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
                     }
                     Spacer(Modifier.weight(1f))
                     NeumorphicPowerButton(isServiceActive, isLandscape = true) {
@@ -217,7 +217,7 @@ fun ShiftDataScreen(context: Context, hasNotifyPerm: Boolean, hasSecureSettings:
             Column(modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
                 Spacer(Modifier.height(24.dp))
                 Text("shiftData", letterSpacing = 4.sp, fontWeight = FontWeight.Black, fontSize = 13.sp)
-                Text("v3.0.5.5 / STABLE", color = Color.Gray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                Text("v3.0.6 / STABLE", color = Color.Gray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
                 Spacer(Modifier.weight(1f))
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                     NeumorphicPowerButton(isServiceActive, isLandscape = false) {

@@ -54,6 +54,16 @@ class DataSwitchService : Service() {
 
     private val logsMutex = Mutex()
     private val toggleMutex = Mutex()
+
+    private enum class DataControlState {
+        AUTOMATED_ON,
+        AUTOMATED_OFF,
+        MANUAL_USER_CONTROL
+    }
+
+    private var currentControlState = DataControlState.AUTOMATED_ON
+    private val isInternalToggle = AtomicBoolean(false)
+
     private lateinit var audioManager: AudioManager
 
     // Local RAM state for media
@@ -162,54 +172,46 @@ class DataSwitchService : Service() {
         }
     }*/
 
-    private var telephonyCallback: Any? = null // Typed as Any? to prevent class-loading crashes on older APIs
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
+    // 🛠️ REPLACE your entire registerDataToggleListener() function with this:
     private fun registerDataToggleListener() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            // Android 12+ (API 31): Direct Telephony Toggle Listener (Zero Background Radio Noise)
-            val callback =
-                object : TelephonyCallback(), TelephonyCallback.UserMobileDataStateListener {
-                    override fun onUserMobileDataStateChanged(enabled: Boolean) {
-                        isMobileDataEnabled = enabled
-                        Log.d(
-                            "DataSwitchService",
-                            "TelephonyCallback -> Mobile Data Toggle changed to: $enabled"
-                        )
-                    }
-                }
-            telephonyCallback = callback
-            telephonyManager.registerTelephonyCallback(mainExecutor, callback)
+        connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
-            // Initial read to sync up RAM state immediately on start
-            isMobileDataEnabled = Settings.Global.getInt(contentResolver, "mobile_data", 0) == 1
-        } else {
-            // Android 11 and Below Fallback: NetworkCallback to bypass OEM database key fragmentation
-            connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                isMobileDataEnabled = true
+                Log.d("ShiftData_LeakCheck", "[Instance:${this@DataSwitchService.hashCode()}] NetworkCallback -> Cellular Data Available")
 
-            val callback = object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    isMobileDataEnabled = true
-                    Log.d("ShiftData_LeakCheck", "[Instance:${this@DataSwitchService.hashCode()}] Fallback Callback -> Cellular Data Available")
-                }
-
-                override fun onLost(network: Network) {
-                    isMobileDataEnabled = false
-                    Log.d("ShiftData_LeakCheck", "[Instance:${this@DataSwitchService.hashCode()}] Fallback Callback -> Cellular Data Lost/Disabled")
+                // 🛡️ MANUAL SWITCH DETECTOR: Check if the change came from a user or our internal toggle logic
+                if (!isInternalToggle.get()) {
+                    currentControlState = DataControlState.MANUAL_USER_CONTROL
+                    Log.d("DataSwitchService", "NetworkCallback -> Manual User Toggle (Data Enabled) Detected")
                 }
             }
-            networkCallback = callback
 
-            val request = NetworkRequest.Builder()
-                .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
-                .build()
+            override fun onLost(network: Network) {
+                isMobileDataEnabled = false
+                Log.d("ShiftData_LeakCheck", "[Instance:${this@DataSwitchService.hashCode()}] NetworkCallback -> Cellular Data Lost/Disabled")
 
-            connectivityManager?.registerNetworkCallback(request, callback)
-
-            // Best-effort initial read
-            isMobileDataEnabled = Settings.Global.getInt(contentResolver, "mobile_data", 0) == 1
+                // 🛡️ MANUAL SWITCH DETECTOR
+                if (!isInternalToggle.get()) {
+                    currentControlState = DataControlState.MANUAL_USER_CONTROL
+                    Log.d("DataSwitchService", "NetworkCallback -> Manual User Toggle (Data Disabled) Detected")
+                }
+            }
         }
+        networkCallback = callback
+
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+            .build()
+
+        connectivityManager?.registerNetworkCallback(request, callback)
+
+        // Initial read to sync up RAM state immediately on start
+        isMobileDataEnabled = Settings.Global.getInt(contentResolver, "mobile_data", 0) == 1
     }
 
     private var shiftJob: Job? = null // Tracks the active pending task
@@ -367,17 +369,10 @@ class DataSwitchService : Service() {
             unregisterReceiver(hotspotReceiver)
             Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Hotspot Receiver unregistered successfully.")
 
-            // Adaptive Network / Telephony Unregistration
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && telephonyCallback != null) {
-                Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Attempting Telephony Callback unregistration...")
-                telephonyManager.unregisterTelephonyCallback(telephonyCallback as TelephonyCallback)
-                Log.d("DataSwitchService", "TelephonyCallback unregistered cleanly.")
-            } else {
-                networkCallback?.let {
-                    Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Attempting Fallback Network Callback unregistration...")
-                    connectivityManager?.unregisterNetworkCallback(it)
-                    Log.d("DataSwitchService", "Fallback NetworkCallback unregistered cleanly.")
-                }
+            networkCallback?.let {
+                Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Attempting Network Callback unregistration...")
+                connectivityManager?.unregisterNetworkCallback(it)
+                Log.d("DataSwitchService", "NetworkCallback unregistered cleanly.")
             }
 
         } catch (e: Exception) {
@@ -421,24 +416,22 @@ class DataSwitchService : Service() {
         shiftJob?.cancel()
         shiftJob = serviceScope.launch {
             if (enable) {
-                delay(1000) // Delay only when screen turns ON
+                delay(1000)
             }
             toggleMutex.withLock {
                 try {
-                    // 1. Minimum necessary data (Cached in RAM)
                     var manualLockState = isManualLocked.get()
 
                     if (enable) {
                         // LAZY ENABLE LOGIC
                         when {
-                            // Priority 1: Hotspot (Always overrides)
                             isHotspotActive() -> {
                                 logDataStateChange("HOT_ON")
-                                // Note: We don't toggle data for Hotspot per old logic
+                                currentControlState = DataControlState.AUTOMATED_ON
                             }
 
-                            // Priority 2: Call
                             isCallActive() -> {
+                                currentControlState = DataControlState.AUTOMATED_ON
                                 if (!isMobileDataEnabled) {
                                     toggleData(1)
                                     isMobileDataEnabled = true
@@ -446,8 +439,8 @@ class DataSwitchService : Service() {
                                 } else logDataStateChange("CALL_ON")
                             }
 
-                            // Priority 3: Media
                             isMediaPlaying() -> {
+                                currentControlState = DataControlState.AUTOMATED_ON
                                 if (!isMobileDataEnabled) {
                                     toggleData(1)
                                     isMobileDataEnabled = true
@@ -455,8 +448,8 @@ class DataSwitchService : Service() {
                                 } else logDataStateChange("MED_ON")
                             }
 
-                            // Priority 4: No Manual Lock (Normal ON)
                             !manualLockState -> {
+                                currentControlState = DataControlState.AUTOMATED_ON
                                 if (isMobileDataEnabled) logDataStateChange("BY_ON")
                                 else {
                                     logDataStateChange("ON")
@@ -465,36 +458,38 @@ class DataSwitchService : Service() {
                                 }
                             }
 
-                            // Priority 5: Manual Lock is Active
                             else -> {
-                                if (isMobileDataEnabled) logDataStateChange("BY_ON")
-                                else logDataStateChange("MAN_ON")
+                                if (isMobileDataEnabled) {
+                                    currentControlState = DataControlState.AUTOMATED_ON
+                                    logDataStateChange("BY_ON")
+                                } else logDataStateChange("MAN_ON")
                             }
                         }
                     } else {
                         // LAZY DISABLE LOGIC
 
-                        // A. Sync Manual Lock state (Parity with old logic)
                         if (manualLockState && isMobileDataEnabled) {
                             updateManualLock(false)
                             manualLockState = false
                         }
 
-                        // B. Determine if we should set the lock (Check bypasses lazily)
-                        val needsLock =
-                            !isMobileDataEnabled || isHotspotActive() || isCallActive() || isMediaPlaying()
+                        // CONFIRMED USER ACTION: The user deliberately turned it off manually
+                        // and the current control state confirms it isn't an automated pass
+                        val isTrueManualOff = (currentControlState == DataControlState.MANUAL_USER_CONTROL) && !isMobileDataEnabled
+                        val needsLock = isTrueManualOff || isHotspotActive() || isCallActive() || isMediaPlaying()
+
                         if (needsLock) {
                             updateManualLock(true)
                         }
 
-                        // C. Execution & Logging
                         when {
                             isHotspotActive() -> logDataStateChange("HOT_OFF")
                             isCallActive() -> logDataStateChange("CALL_OFF")
                             isMediaPlaying() -> logDataStateChange("MED_OFF")
-                            !isMobileDataEnabled -> logDataStateChange("MAN_OFF")
+                            isTrueManualOff -> logDataStateChange("MAN_OFF")
                             else -> {
                                 logDataStateChange("OFF")
+                                currentControlState = DataControlState.AUTOMATED_OFF
                                 toggleData(0)
                                 isMobileDataEnabled = false
                             }
@@ -517,11 +512,18 @@ class DataSwitchService : Service() {
 
     private suspend fun toggleData(state: Int) {
         withContext(NonCancellable) {
-            Settings.Global.putInt(contentResolver, "mobile_data", state)
-            Log.d(
-                "DataSwitchService",
-                "Media data switched to: $state"
-            )
+            isInternalToggle.set(true)
+            try {
+                Settings.Global.putInt(contentResolver, "mobile_data", state)
+                Log.d(
+                    "DataSwitchService",
+                    "Media data switched to: $state"
+                )
+            } finally {
+                // Give the system registry a brief window to complete its broadcast cycle
+                delay(200)
+                isInternalToggle.set(false)
+            }
         }
     }
 
@@ -574,7 +576,7 @@ class DataSwitchService : Service() {
 
         // 3. Attach it to the notification builder
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentText("ACTIVE - v3.0.5.5 \\ STABLE")
+            .setContentText("ACTIVE - v3.0.6 \\ STABLE")
             .setSmallIcon(R.drawable.ic_stat_shiftdata)
             .setContentIntent(pendingIntent) // <--- THIS MAKES IT CLICKABLE
             .setPriority(NotificationCompat.PRIORITY_LOW)
