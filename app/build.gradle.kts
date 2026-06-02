@@ -15,8 +15,8 @@ android {
         applicationId = "com.m00seInc.shiftData"
         minSdk = 26
         targetSdk = 36
-        versionCode = 29
-        versionName = "3.0.6"
+        versionCode = 30
+        versionName = "3.0.6.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
