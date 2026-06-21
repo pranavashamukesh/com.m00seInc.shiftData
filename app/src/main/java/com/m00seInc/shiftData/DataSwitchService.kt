@@ -597,7 +597,7 @@ class DataSwitchService : Service() {
 
         // 3. Attach it to the notification builder
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentText("ACTIVE - v3.0.6.1 \\ STABLE")
+            .setContentText("ACTIVE - v3.0.6.3 \\ STABLE")
             .setSmallIcon(R.drawable.ic_stat_shiftdata)
             .setContentIntent(pendingIntent) // <--- THIS MAKES IT CLICKABLE
             .setPriority(NotificationCompat.PRIORITY_LOW)
