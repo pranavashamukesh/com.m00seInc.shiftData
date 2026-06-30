@@ -194,7 +194,7 @@ fun ShiftDataScreen(context: Context, hasNotifyPerm: Boolean, hasSecureSettings:
                 Column(modifier = Modifier.weight(1f).fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally) {
                     Column(Modifier.fillMaxWidth()) {
                         Text("shiftData", letterSpacing = 4.sp, fontWeight = FontWeight.Black, fontSize = 12.sp)
-                        Text("v3.0.7.4 / STABLE", color = Color.Gray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                        Text("v3.0.8.0 / STABLE", color = Color.Gray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
                     }
                     Spacer(Modifier.weight(1f))
                     NeumorphicPowerButton(isServiceActive, isLandscape = true) {
@@ -217,7 +217,7 @@ fun ShiftDataScreen(context: Context, hasNotifyPerm: Boolean, hasSecureSettings:
             Column(modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
                 Spacer(Modifier.height(24.dp))
                 Text("shiftData", letterSpacing = 4.sp, fontWeight = FontWeight.Black, fontSize = 13.sp)
-                Text("v3.0.7.4 / STABLE", color = Color.Gray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                Text("v3.0.8.0 / STABLE", color = Color.Gray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
                 Spacer(Modifier.weight(1f))
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                     NeumorphicPowerButton(isServiceActive, isLandscape = false) {
@@ -263,18 +263,19 @@ fun RowScope.LogColumn(log: String?, isLeftColumn: Boolean, isLandscape: Boolean
 
             val label = when (rawStatus) {
                 "OFF" -> "mobile data - off"
+                "MOTION_OFF" -> "mobile data- off:trip"
                 "ON" -> "mobile data - on"
-                "HOT_OFF", "HOT_ON" -> "bypass - hotspot"
-                "MED_OFF", "MED_ON" -> "bypass - media"
-                "CALL_OFF", "CALL_ON" -> "bypass - call"
-                "MAN_OFF", "MAN_ON" -> "bypass - manual"
-                "BY_ON" -> "bypass - nochange"
+                "HOT_OFF", "HOT_ON" -> "bypass:hotspot"
+                "MED_OFF", "MED_ON" -> "bypass:media"
+                "CALL_OFF", "CALL_ON" -> "bypass:call"
+                "MAN_OFF", "MAN_ON" -> "bypass:manual"
+                "BY_ON" -> "bypass:nochange"
                 "CALL_ON_ON" -> "mobile data - on:call"
                 "MED_ON_ON" -> "mobile data - on:call"
                 else -> "bypass"
             }
 
-            val textColor = if (rawStatus == "ON" || rawStatus == "OFF") MaterialTheme.colorScheme.onSurface else Color.Gray
+            val textColor = if (rawStatus == "ON" || rawStatus == "OFF" || rawStatus == "MOTION_OFF") MaterialTheme.colorScheme.onSurface else Color.Gray
 
             Text(time, color = textColor, fontSize = fontSize, fontFamily = FontFamily.Monospace)
             if (!isLandscape) Spacer(Modifier.height(2.dp))

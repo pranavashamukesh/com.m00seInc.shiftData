@@ -38,6 +38,10 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Job
+import android.hardware.Sensor
+import android.hardware.SensorManager
+import android.hardware.TriggerEvent
+import android.hardware.TriggerEventListener
 
 class DataSwitchService : Service() {
 
@@ -179,6 +183,14 @@ class DataSwitchService : Service() {
     //private var telephonyCallback: Any? = null // Typed as Any? to prevent class-loading crashes on older APIs
     //private var connectivityManager: ConnectivityManager? = null
     //private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    // --- ADVANCED MECHANICAL LOCOMOTION FIELDS ---
+    private lateinit var sensorManager: SensorManager
+    private var significantMotionSensor: Sensor? = null
+    private var motionTriggerListener: TriggerEventListener? = null
+
+    private var isValidationActive = false
+    private var wasTruncatedByMotion = false
+    private var alarmTriggerTime: Long = 0L
     private var mobileDataObserver: android.database.ContentObserver? = null
 
     private fun registerDataToggleListener() {
@@ -213,6 +225,41 @@ class DataSwitchService : Service() {
         Log.d("DataSwitchService", "Engine Lock -> ContentObserver successfully bound to global table.")
     }
 
+    private fun registerMotionTriggerListener() {
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        significantMotionSensor = sensorManager.getDefaultSensor(Sensor.TYPE_SIGNIFICANT_MOTION)
+
+        motionTriggerListener = object : TriggerEventListener() {
+            override fun onTrigger(event: TriggerEvent?) {
+                val currentTime = android.os.SystemClock.elapsedRealtime()
+
+                if (isValidationActive) {
+                    // PHASE 2 CONFIRMED: Continuous motion verified during the 3-minute window!
+                    Log.d("DataSwitchService", "[MOTION] 🏃 Sustained motion verified. Executing immediate cutoff.")
+                    cancelValidationTimeout()
+                    shiftMobileData(false, isMotionTriggered = true)
+                } else {
+                    // PHASE 1: Movement detected during the standard 90-minute cooldown
+                    val remainingMillis = alarmTriggerTime - currentTime
+                    val primaryCooldownInMillis = 5L * 60L * 1000L //LOCAL TESTING VALUE, PRODUCTION: 5L * 60L * 1000L
+
+                    if (isAlarmActive && remainingMillis > primaryCooldownInMillis) {
+                        Log.d("DataSwitchService", "[MOTION] Motion detected. Truncating cooldown down to 5 mins.")
+                        wasTruncatedByMotion = true
+                        cancelDelayedOff()
+                        scheduleDelayedOff(5) // LOCAL TESTING VALUE, PRODUCTION : 5
+                    } else {
+                        // Re-arm the one-shot hardware sensor if parameters aren't met
+                        significantMotionSensor?.let { sensor ->
+                            sensorManager.requestTriggerSensor(this, sensor)
+                        }
+                    }
+                }
+            }
+        }
+        Log.d("DataSwitchService", "Engine Lock -> MotionTriggerListener successfully initialized.")
+    }
+
     private var shiftJob: Job? = null // Tracks the active pending task
     private lateinit var powerManager: PowerManager
     private lateinit var prefs: android.content.SharedPreferences // Cache the prefs too
@@ -228,6 +275,8 @@ class DataSwitchService : Service() {
 
         // Unique action identifier for the 1-hour system alarm
         private const val ACTION_DELAYED_OFF = "com.m00seInc.shiftData.ACTION_DELAYED_OFF"
+        //Unique identifier for the 3-minute validation channel
+        private const val ACTION_VALIDATION_TIMEOUT = "com.m00seInc.shiftData.ACTION_VALIDATION_TIMEOUT"
     }
 
     override fun onCreate() {
@@ -276,7 +325,8 @@ class DataSwitchService : Service() {
         // Initial sync
         // Register the Phone State Receiver
         val filter = IntentFilter(TelephonyManager.ACTION_PHONE_STATE_CHANGED)
-        registerReceiver(phoneStateReceiver, filter)
+        ContextCompat.registerReceiver(this, phoneStateReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
+
         val hasPerm = ContextCompat.checkSelfPermission(
             this,
             android.Manifest.permission.READ_PHONE_STATE
@@ -302,7 +352,7 @@ class DataSwitchService : Service() {
         }
 
         val hotspotFilter = IntentFilter("android.net.wifi.WIFI_AP_STATE_CHANGED")
-        registerReceiver(hotspotReceiver, hotspotFilter)
+        ContextCompat.registerReceiver(this, hotspotReceiver, hotspotFilter, ContextCompat.RECEIVER_EXPORTED)
         isHotspotActiveLocally = Settings.Global.getInt(contentResolver, "wifi_ap_state", 0) == 1
         /*
         val mobileDataUri = Settings.Global.getUriFor("mobile_data")
@@ -315,7 +365,10 @@ class DataSwitchService : Service() {
         //connectivityManager.registerNetworkCallback(request, networkCallback)
 
         //isMobileDataEnabled = Settings.Global.getInt(contentResolver, "mobile_data", 0) == 1
+
         registerDataToggleListener()
+
+        registerMotionTriggerListener()
 
         serviceScope.launch {
             logsMutex.withLock {
@@ -402,6 +455,13 @@ class DataSwitchService : Service() {
                 Log.d("DataSwitchService", "ContentObserver detached cleanly.")
             }
 
+            cancelValidationTimeout()
+            significantMotionSensor?.let { sensor ->
+                if (motionTriggerListener != null) {
+                    sensorManager.cancelTriggerSensor(motionTriggerListener, sensor)
+                }
+            }
+
         } catch (e: Exception) {
             Log.e(
                 "ShiftData_LeakCheck",
@@ -418,47 +478,106 @@ class DataSwitchService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun registerScreenReceiver() {
-        val filter =
-            IntentFilter().apply {
-                addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON); addAction(
-                ACTION_DELAYED_OFF
-            )
-            }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(ACTION_DELAYED_OFF)
+            addAction(ACTION_VALIDATION_TIMEOUT) // Monitor the 3-minute verification timeout
+        }
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 when (intent.action) {
                     Intent.ACTION_SCREEN_OFF -> {
                         Log.d("ShiftData_Lifecycle", "[HARDWARE] 🔒 Phone Locked (SCREEN_OFF)")
                         shiftJob?.cancel()
-                        scheduleDelayedOff()
+                        wasTruncatedByMotion = false
+                        isValidationActive = false
+
+                        // Start standard 90-minute cooldown
+                        scheduleDelayedOff(90) //LOCAL TESTING VALUE, PRODUCTION : 90
+
+                        // Arm the hardware sensor trap
+                        significantMotionSensor?.let { sensor ->
+                            sensorManager.requestTriggerSensor(motionTriggerListener, sensor)
+                            Log.d("DataSwitchService", "[MOTION] Sensor armed for travel tracking.")
+                        }
                     }
 
                     Intent.ACTION_SCREEN_ON -> {
                         Log.d("ShiftData_Lifecycle", "[HARDWARE] 🔓 Phone Unlocked (SCREEN_ON)")
-                        if (isAlarmActive) {
-                            // CASE 1: Quick unlock. Data was never turned off.
-                            cancelDelayedOff()
+
+                        // 1. Snapshot if the automation cycle was still running/waiting to turn data off
+                        val isAutomationInProgress = isAlarmActive || isValidationActive
+
+                        // 2. Clear all hardware sensors and pending alarm managers cleanly
+                        significantMotionSensor?.let { sensor ->
+                            sensorManager.cancelTriggerSensor(motionTriggerListener, sensor)
+                        }
+                        cancelDelayedOff()
+                        cancelValidationTimeout()
+                        wasTruncatedByMotion = false
+
+                        // 3. Apply the unified short-circuit guard
+                        if (isAutomationInProgress) {
+                            // CASE 1: Quick unlock during cooldown OR validation window. Data was never cut.
                             Log.d(
                                 "ShiftData_Lifecycle",
-                                "Unlock -> Timer was active. Data is untouched. Skipping evaluation."
+                                "Unlock -> System was still in tracking phase. Data untouched. Short-circuiting smoothly."
                             )
                         } else {
-                            // CASE 2: Extended lock period. Data was turned off by the alarm.
+                            // CASE 2: Extended lock period. Both tracking phases passed, and data was safely cut.
                             Log.d(
                                 "ShiftData_Lifecycle",
-                                "Unlock -> Timer already ran out. Restoring data link..."
+                                "Unlock -> Countdown expired completely. Restoring data link..."
                             )
                             shiftMobileData(true)
                         }
                     }
 
                     ACTION_DELAYED_OFF -> {
-                        isAlarmActive = false // The timer has finished executing
+                        isAlarmActive = false
+
+                        if (wasTruncatedByMotion) {
+                            // The 5-minute truncation timer ran out! Pivot to verification mode.
+                            wasTruncatedByMotion = false
+                            scheduleValidationTimeout()
+
+                            significantMotionSensor?.let { sensor ->
+                                sensorManager.requestTriggerSensor(motionTriggerListener, sensor)
+                            }
+                            Log.d("ShiftData_Lifecycle", "[ALARM] 5-min cooldown hit. Transitioning to 3-min validation phase...")
+                        } else {
+                            // Standard 90-minute timeout won the race
+                            significantMotionSensor?.let { sensor ->
+                                sensorManager.cancelTriggerSensor(motionTriggerListener, sensor)
+                            }
+                            Log.d("ShiftData_Lifecycle", "[ALARM] ⏰ 90-min standard timeout reached.")
+                            shiftMobileData(false, isMotionTriggered = false)
+                        }
+                    }
+
+                    ACTION_VALIDATION_TIMEOUT -> {
+                        // The 3 minutes passed without any confirmed sustained movement.
+                        // The user has stopped moving. Reset the cycle completely.
+                        isValidationActive = false
+
+                        // Clear the hardware handle out of the registry before re-arming
+                        significantMotionSensor?.let { sensor ->
+                            sensorManager.cancelTriggerSensor(motionTriggerListener, sensor)
+                        }
+
                         Log.d(
                             "ShiftData_Lifecycle",
-                            "[ALARM] ⏰ Timer Reached -> Running Disable Routine"
+                            "[VALIDATION] Window expired with zero motion. Spurious movement filtered. Restarting 90-min standard loop."
                         )
-                        shiftMobileData(false)
+
+                        // 1. Restart the standard 90-minute tracking countdown
+                        scheduleDelayedOff(90) //LOCAL TESTING VALUE, PRODUCTION : 90
+
+                        // 2. Re-arm the hardware sensor hub to monitor this new 90-minute block
+                        significantMotionSensor?.let { sensor ->
+                            sensorManager.requestTriggerSensor(motionTriggerListener, sensor)
+                        }
                     }
                 }
             }
@@ -471,7 +590,8 @@ class DataSwitchService : Service() {
         screenStateReceiver?.let { unregisterReceiver(it); screenStateReceiver = null }
     }
 
-    private fun shiftMobileData(enable: Boolean) {
+    // 1. UPDATE THE FUNCTION SIGNATURE:
+    private fun shiftMobileData(enable: Boolean, isMotionTriggered: Boolean = false) {
         shiftJob?.cancel()
 
         // ACQUIRE TRANSIENT WAKELOCK: Holds the CPU awake just long enough to execute this coroutine safely
@@ -558,7 +678,10 @@ class DataSwitchService : Service() {
                                 isMediaPlaying() -> logDataStateChange("MED_OFF")
                                 isTrueManualOff -> logDataStateChange("MAN_OFF")
                                 else -> {
-                                    logDataStateChange("OFF")
+                                    // Set clean string code based on hardware sensor parameters
+                                    val telemetryTag = if (isMotionTriggered) "MOTION_OFF" else "OFF"
+                                    logDataStateChange(telemetryTag)
+
                                     currentControlState = DataControlState.AUTOMATED_OFF
                                     toggleData(0)
                                     isMobileDataEnabled = false
@@ -578,22 +701,24 @@ class DataSwitchService : Service() {
         }
     }
 
-    private fun scheduleDelayedOff() {
+    private fun scheduleDelayedOff(minutes: Int = 90) {
         val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(ACTION_DELAYED_OFF).setPackage(packageName)
         val pendingIntent = PendingIntent.getBroadcast(
             this, 99, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val triggerAtMillis = android.os.SystemClock.elapsedRealtime() + (90 * 60 * 1000)
+        val delayMillis = minutes.toLong() * 60L * 1000L
+        alarmTriggerTime = android.os.SystemClock.elapsedRealtime() + delayMillis
 
         alarmManager.setAndAllowWhileIdle(
             AlarmManager.ELAPSED_REALTIME_WAKEUP,
-            triggerAtMillis,
+            alarmTriggerTime,
             pendingIntent
         )
 
-        isAlarmActive = true // Mark timer as running
+        isAlarmActive = true
+        Log.d("DataSwitchService", "[ALARM] Scheduled successfully for $minutes minutes.")
     }
 
     private fun cancelDelayedOff() {
@@ -606,8 +731,33 @@ class DataSwitchService : Service() {
         alarmManager.cancel(pendingIntent)
         pendingIntent.cancel()
 
-        isAlarmActive = false // Mark timer as stopped
+        isAlarmActive = false
         Log.d("DataSwitchService", "Pending alarm token successfully cleared from system table.")
+    }
+
+    private fun scheduleValidationTimeout() {
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(ACTION_VALIDATION_TIMEOUT).setPackage(packageName)
+        val pendingIntent = PendingIntent.getBroadcast(
+            this, 100, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val triggerAtMillis = android.os.SystemClock.elapsedRealtime() + (3 * 60 * 1000) // LOCAL TESTING VALUE , PRODUCTION: 3 * 60 * 1000
+        alarmManager.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAtMillis, pendingIntent)
+
+        isValidationActive = true
+        Log.d("DataSwitchService", "[VALIDATION] 3-minute verification window opened.")
+    }
+
+    private fun cancelValidationTimeout() {
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(ACTION_VALIDATION_TIMEOUT).setPackage(packageName)
+        val pendingIntent = PendingIntent.getBroadcast(
+            this, 100, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        alarmManager.cancel(pendingIntent)
+        pendingIntent.cancel()
+        isValidationActive = false
     }
 
 // --- PURE MEMORY/CACHED HELPERS ---
@@ -684,7 +834,7 @@ class DataSwitchService : Service() {
 
         // 3. Attach it to the notification builder
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentText("ACTIVE - v3.0.7.4 \\ STABLE")
+            .setContentText("ACTIVE - v3.0.8.0 \\ STABLE")
             .setSmallIcon(R.drawable.ic_stat_shiftdata)
             .setContentIntent(pendingIntent) // <--- THIS MAKES IT CLICKABLE
             .setPriority(NotificationCompat.PRIORITY_LOW)
