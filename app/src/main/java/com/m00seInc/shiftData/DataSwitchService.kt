@@ -1,5 +1,6 @@
 package com.m00seInc.shiftData
 
+import android.app.AlarmManager
 import android.telephony.TelephonyManager
 import android.app.Notification
 import android.app.NotificationChannel
@@ -13,17 +14,12 @@ import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.media.AudioPlaybackConfiguration
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
-import android.telephony.TelephonyCallback
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -83,7 +79,8 @@ class DataSwitchService : Service() {
                         val contentType = attrs.contentType
                         if (contentType == android.media.AudioAttributes.CONTENT_TYPE_MUSIC ||
                             contentType == android.media.AudioAttributes.CONTENT_TYPE_MOVIE ||
-                            contentType == android.media.AudioAttributes.CONTENT_TYPE_SPEECH) {
+                            contentType == android.media.AudioAttributes.CONTENT_TYPE_SPEECH
+                        ) {
                             mediaActive = true
                         }
                     }
@@ -108,10 +105,16 @@ class DataSwitchService : Service() {
             isVoipCallActiveLocally = voipActive
 
             if (wasMediaPlaying != isMediaPlayingLocally) {
-                Log.d("DataSwitchService", "Audio Evaluator -> Media Track State Active: $isMediaPlayingLocally")
+                Log.d(
+                    "DataSwitchService",
+                    "Audio Evaluator -> Media Track State Active: $isMediaPlayingLocally"
+                )
             }
             if (wasVoipActive != isVoipCallActiveLocally) {
-                Log.d("DataSwitchService", "Audio Evaluator -> VoIP Call State Active: $isVoipCallActiveLocally")
+                Log.d(
+                    "DataSwitchService",
+                    "Audio Evaluator -> VoIP Call State Active: $isVoipCallActiveLocally"
+                )
             }
         }
     }
@@ -157,6 +160,7 @@ class DataSwitchService : Service() {
     }
 
     private var isMobileDataEnabled = false
+    private var isAlarmActive = false
     private var isVoipCallActiveLocally = false
 
     /*private lateinit var connectivityManager: ConnectivityManager
@@ -172,60 +176,41 @@ class DataSwitchService : Service() {
         }
     }*/
 
-    private var telephonyCallback: Any? = null // Typed as Any? to prevent class-loading crashes on older APIs
-    private var connectivityManager: ConnectivityManager? = null
-    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    //private var telephonyCallback: Any? = null // Typed as Any? to prevent class-loading crashes on older APIs
+    //private var connectivityManager: ConnectivityManager? = null
+    //private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var mobileDataObserver: android.database.ContentObserver? = null
 
     private fun registerDataToggleListener() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            // Android 12+ (API 31): Direct Telephony Toggle Listener (Zero Background Radio Noise)
-            val callback =
-                object : TelephonyCallback(), TelephonyCallback.UserMobileDataStateListener {
-                    override fun onUserMobileDataStateChanged(enabled: Boolean) {
-                        isMobileDataEnabled = enabled
-                        Log.d(
-                            "DataSwitchService",
-                            "TelephonyCallback -> Mobile Data Toggle changed to: $enabled"
-                        )
+        // Synchronize initial baseline RAM state straight from the system table
+        isMobileDataEnabled = Settings.Global.getInt(contentResolver, "mobile_data", 0) == 1
+        currentControlState = if (isMobileDataEnabled) DataControlState.AUTOMATED_ON else DataControlState.MANUAL_USER_CONTROL
 
-                        // If the toggle didn't come from our code, the user changed it manually
-                        if (!isInternalToggle.get()) {
-                            currentControlState = DataControlState.MANUAL_USER_CONTROL
-                            Log.d("DataSwitchService", "TelephonyCallback -> Manual User Toggle Detected")
-                        }
-                    }
-                }
-            telephonyCallback = callback
-            telephonyManager.registerTelephonyCallback(mainExecutor, callback)
+        mobileDataObserver = object : android.database.ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) {
+                super.onChange(selfChange)
 
-            // Initial read to sync up RAM state immediately on start
-            isMobileDataEnabled = Settings.Global.getInt(contentResolver, "mobile_data", 0) == 1
-        } else {
-            // Android 11 and Below Fallback: NetworkCallback to bypass OEM database key fragmentation
-            connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                // Read directly from the software settings database key to remain immune to network drops
+                val rawValue = Settings.Global.getString(contentResolver, "mobile_data")
+                val enabled = rawValue == "1"
+                isMobileDataEnabled = enabled
 
-            val callback = object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    isMobileDataEnabled = true
-                    Log.d("ShiftData_LeakCheck", "[Instance:${this@DataSwitchService.hashCode()}] Fallback Callback -> Cellular Data Available")
-                }
-
-                override fun onLost(network: Network) {
-                    isMobileDataEnabled = false
-                    Log.d("ShiftData_LeakCheck", "[Instance:${this@DataSwitchService.hashCode()}] Fallback Callback -> Cellular Data Lost/Disabled")
+                // Differentiate automated script operations from manual user shade interactions
+                if (!isInternalToggle.get()) {
+                    currentControlState = DataControlState.MANUAL_USER_CONTROL
+                    Log.d("DataSwitchService", "ContentObserver -> True Manual User Toggle Detected: $enabled")
+                } else {
+                    Log.d("DataSwitchService", "ContentObserver -> Automated Internal Toggle Absorbed: $enabled")
                 }
             }
-            networkCallback = callback
-
-            val request = NetworkRequest.Builder()
-                .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
-                .build()
-
-            connectivityManager?.registerNetworkCallback(request, callback)
-
-            // Best-effort initial read
-            isMobileDataEnabled = Settings.Global.getInt(contentResolver, "mobile_data", 0) == 1
         }
+
+        contentResolver.registerContentObserver(
+            Settings.Global.getUriFor("mobile_data"),
+            false,
+            mobileDataObserver!!
+        )
+        Log.d("DataSwitchService", "Engine Lock -> ContentObserver successfully bound to global table.")
     }
 
     private var shiftJob: Job? = null // Tracks the active pending task
@@ -240,6 +225,9 @@ class DataSwitchService : Service() {
         private const val CHANNEL_ID = "shiftData_channel"
         private const val NOTIFICATION_ID = 1
         private const val MAX_LOG_ENTRIES = 20
+
+        // Unique action identifier for the 1-hour system alarm
+        private const val ACTION_DELAYED_OFF = "com.m00seInc.shiftData.ACTION_DELAYED_OFF"
     }
 
     override fun onCreate() {
@@ -268,6 +256,7 @@ class DataSwitchService : Service() {
                 android.media.AudioAttributes.USAGE_GAME -> {
                     bootMediaActive = true
                 }
+
                 android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION,
                 android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION_SIGNALLING -> {
                     bootVoipActive = true
@@ -364,40 +353,61 @@ class DataSwitchService : Service() {
         val instanceId = this.hashCode()
 
         Log.d("ShiftData_LeakCheck", "==================================================")
-        Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] onDestroy() triggered. Starting teardown...")
+        Log.d(
+            "ShiftData_LeakCheck",
+            "[Instance:$instanceId] onDestroy() triggered. Starting teardown..."
+        )
         Log.d("ShiftData_LeakCheck", "==================================================")
 
         unregisterScreenReceiver()
+        cancelDelayedOff()
+
         try {
-            Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Attempting Audio Callback unregistration...")
+            Log.d(
+                "ShiftData_LeakCheck",
+                "[Instance:$instanceId] Attempting Audio Callback unregistration..."
+            )
             if (::audioManager.isInitialized) {
                 audioManager.unregisterAudioPlaybackCallback(audioPlaybackCallback)
             }
-            Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Audio Callback unregistered successfully.")
+            Log.d(
+                "ShiftData_LeakCheck",
+                "[Instance:$instanceId] Audio Callback unregistered successfully."
+            )
 
-            Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Attempting Phone State Receiver unregistration...")
+            Log.d(
+                "ShiftData_LeakCheck",
+                "[Instance:$instanceId] Attempting Phone State Receiver unregistration..."
+            )
             unregisterReceiver(phoneStateReceiver)
-            Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Phone State Receiver unregistered successfully.")
+            Log.d(
+                "ShiftData_LeakCheck",
+                "[Instance:$instanceId] Phone State Receiver unregistered successfully."
+            )
 
-            Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Attempting Hotspot Receiver unregistration...")
+            Log.d(
+                "ShiftData_LeakCheck",
+                "[Instance:$instanceId] Attempting Hotspot Receiver unregistration..."
+            )
             unregisterReceiver(hotspotReceiver)
-            Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Hotspot Receiver unregistered successfully.")
+            Log.d(
+                "ShiftData_LeakCheck",
+                "[Instance:$instanceId] Hotspot Receiver unregistered successfully."
+            )
 
-            // Adaptive Network / Telephony Unregistration
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && telephonyCallback != null) {
-                Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Attempting Telephony Callback unregistration...")
-                telephonyManager.unregisterTelephonyCallback(telephonyCallback as TelephonyCallback)
-                Log.d("DataSwitchService", "TelephonyCallback unregistered cleanly.")
-            } else {
-                networkCallback?.let {
-                    Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Attempting Fallback Network Callback unregistration...")
-                    connectivityManager?.unregisterNetworkCallback(it)
-                    Log.d("DataSwitchService", "Fallback NetworkCallback unregistered cleanly.")
-                }
+            mobileDataObserver?.let {
+                Log.d("ShiftData_LeakCheck", "[Instance:$instanceId] Unregistering ContentObserver...")
+                contentResolver.unregisterContentObserver(it)
+                mobileDataObserver = null
+                Log.d("DataSwitchService", "ContentObserver detached cleanly.")
             }
 
         } catch (e: Exception) {
-            Log.e("ShiftData_LeakCheck", "[Instance:$instanceId] CRITICAL TEARDOWN FAILURE! Chain broken.", e)
+            Log.e(
+                "ShiftData_LeakCheck",
+                "[Instance:$instanceId] CRITICAL TEARDOWN FAILURE! Chain broken.",
+                e
+            )
         }
 
         updateUI()
@@ -409,24 +419,52 @@ class DataSwitchService : Service() {
 
     private fun registerScreenReceiver() {
         val filter =
-            IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON) }
+            IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON); addAction(
+                ACTION_DELAYED_OFF
+            )
+            }
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 when (intent.action) {
                     Intent.ACTION_SCREEN_OFF -> {
                         Log.d("ShiftData_Lifecycle", "[HARDWARE] 🔒 Phone Locked (SCREEN_OFF)")
-                        shiftMobileData(false)
+                        shiftJob?.cancel()
+                        scheduleDelayedOff()
                     }
 
                     Intent.ACTION_SCREEN_ON -> {
                         Log.d("ShiftData_Lifecycle", "[HARDWARE] 🔓 Phone Unlocked (SCREEN_ON)")
-                        shiftMobileData(true)
+                        if (isAlarmActive) {
+                            // CASE 1: Quick unlock. Data was never turned off.
+                            cancelDelayedOff()
+                            Log.d(
+                                "ShiftData_Lifecycle",
+                                "Unlock -> Timer was active. Data is untouched. Skipping evaluation."
+                            )
+                        } else {
+                            // CASE 2: Extended lock period. Data was turned off by the alarm.
+                            Log.d(
+                                "ShiftData_Lifecycle",
+                                "Unlock -> Timer already ran out. Restoring data link..."
+                            )
+                            shiftMobileData(true)
+                        }
+                    }
+
+                    ACTION_DELAYED_OFF -> {
+                        isAlarmActive = false // The timer has finished executing
+                        Log.d(
+                            "ShiftData_Lifecycle",
+                            "[ALARM] ⏰ Timer Reached -> Running Disable Routine"
+                        )
+                        shiftMobileData(false)
                     }
                 }
             }
         }
         screenStateReceiver = receiver
-        ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_EXPORTED)
     }
 
     private fun unregisterScreenReceiver() {
@@ -435,92 +473,141 @@ class DataSwitchService : Service() {
 
     private fun shiftMobileData(enable: Boolean) {
         shiftJob?.cancel()
+
+        // ACQUIRE TRANSIENT WAKELOCK: Holds the CPU awake just long enough to execute this coroutine safely
+        val wakeLock =
+            powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "shiftData:ActionWakeLock")
+                .apply {
+                    acquire(5000L) // 5-second maximum safety hardware fallback timeout
+                }
+
         shiftJob = serviceScope.launch {
-            if (enable) {
-                delay(1000)
-            }
-            toggleMutex.withLock {
-                try {
-                    var manualLockState = isManualLocked.get()
+            try {
+                if (enable) {
+                    delay(1000)
+                }
+                toggleMutex.withLock {
+                    try {
+                        var manualLockState = isManualLocked.get()
 
-                    if (enable) {
-                        // LAZY ENABLE LOGIC
-                        when {
-                            isHotspotActive() -> {
-                                logDataStateChange("HOT_ON")
-                                currentControlState = DataControlState.AUTOMATED_ON
-                            }
+                        if (enable) {
+                            // LAZY ENABLE LOGIC
+                            when {
+                                isHotspotActive() -> {
+                                    logDataStateChange("HOT_ON")
+                                    currentControlState = DataControlState.AUTOMATED_ON
+                                }
 
-                            isCallActive() -> {
-                                currentControlState = DataControlState.AUTOMATED_ON
-                                if (!isMobileDataEnabled) {
-                                    toggleData(1)
-                                    isMobileDataEnabled = true
-                                    logDataStateChange("ON")
-                                } else logDataStateChange("CALL_ON")
-                            }
+                                isCallActive() -> {
+                                    currentControlState = DataControlState.AUTOMATED_ON
+                                    if (!isMobileDataEnabled) {
+                                        toggleData(1)
+                                        isMobileDataEnabled = true
+                                        logDataStateChange("ON")
+                                    } else logDataStateChange("CALL_ON")
+                                }
 
-                            isMediaPlaying() -> {
-                                currentControlState = DataControlState.AUTOMATED_ON
-                                if (!isMobileDataEnabled) {
-                                    toggleData(1)
-                                    isMobileDataEnabled = true
-                                    logDataStateChange("ON")
-                                } else logDataStateChange("MED_ON")
-                            }
+                                isMediaPlaying() -> {
+                                    currentControlState = DataControlState.AUTOMATED_ON
+                                    if (!isMobileDataEnabled) {
+                                        toggleData(1)
+                                        isMobileDataEnabled = true
+                                        logDataStateChange("ON")
+                                    } else logDataStateChange("MED_ON")
+                                }
 
-                            !manualLockState -> {
-                                currentControlState = DataControlState.AUTOMATED_ON
-                                if (isMobileDataEnabled) logDataStateChange("BY_ON")
-                                else {
-                                    logDataStateChange("ON")
-                                    toggleData(1)
-                                    isMobileDataEnabled = true
+                                !manualLockState -> {
+                                    currentControlState = DataControlState.AUTOMATED_ON
+                                    if (isMobileDataEnabled) logDataStateChange("BY_ON")
+                                    else {
+                                        logDataStateChange("ON")
+                                        toggleData(1)
+                                        isMobileDataEnabled = true
+                                    }
+                                }
+
+                                else -> {
+                                    if (isMobileDataEnabled) {
+                                        currentControlState = DataControlState.AUTOMATED_ON
+                                        logDataStateChange("BY_ON")
+                                    } else logDataStateChange("MAN_ON")
                                 }
                             }
+                        } else {
+                            // LAZY DISABLE LOGIC
 
-                            else -> {
-                                if (isMobileDataEnabled) {
-                                    currentControlState = DataControlState.AUTOMATED_ON
-                                    logDataStateChange("BY_ON")
-                                } else logDataStateChange("MAN_ON")
+                            if (manualLockState && isMobileDataEnabled) {
+                                updateManualLock(false)
+                                manualLockState = false
+                            }
+
+                            // CONFIRMED USER ACTION: The user deliberately turned it off manually
+                            // and the current control state confirms it isn't an automated pass
+                            val isTrueManualOff =
+                                (currentControlState == DataControlState.MANUAL_USER_CONTROL) && !isMobileDataEnabled
+                            val needsLock =
+                                isTrueManualOff || isHotspotActive() || isCallActive() || isMediaPlaying()
+
+                            if (needsLock) {
+                                updateManualLock(true)
+                            }
+
+                            when {
+                                isHotspotActive() -> logDataStateChange("HOT_OFF")
+                                isCallActive() -> logDataStateChange("CALL_OFF")
+                                isMediaPlaying() -> logDataStateChange("MED_OFF")
+                                isTrueManualOff -> logDataStateChange("MAN_OFF")
+                                else -> {
+                                    logDataStateChange("OFF")
+                                    currentControlState = DataControlState.AUTOMATED_OFF
+                                    toggleData(0)
+                                    isMobileDataEnabled = false
+                                }
                             }
                         }
-                    } else {
-                        // LAZY DISABLE LOGIC
-
-                        if (manualLockState && isMobileDataEnabled) {
-                            updateManualLock(false)
-                            manualLockState = false
-                        }
-
-                        // CONFIRMED USER ACTION: The user deliberately turned it off manually
-                        // and the current control state confirms it isn't an automated pass
-                        val isTrueManualOff = (currentControlState == DataControlState.MANUAL_USER_CONTROL) && !isMobileDataEnabled
-                        val needsLock = isTrueManualOff || isHotspotActive() || isCallActive() || isMediaPlaying()
-
-                        if (needsLock) {
-                            updateManualLock(true)
-                        }
-
-                        when {
-                            isHotspotActive() -> logDataStateChange("HOT_OFF")
-                            isCallActive() -> logDataStateChange("CALL_OFF")
-                            isMediaPlaying() -> logDataStateChange("MED_OFF")
-                            isTrueManualOff -> logDataStateChange("MAN_OFF")
-                            else -> {
-                                logDataStateChange("OFF")
-                                currentControlState = DataControlState.AUTOMATED_OFF
-                                toggleData(0)
-                                isMobileDataEnabled = false
-                            }
-                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
+                }
+            }finally {
+                // ALWAYS RELEASE: Guarantees the CPU can safely drop back into deep sleep immediately
+                if (wakeLock.isHeld) {
+                    wakeLock.release()
                 }
             }
         }
+    }
+
+    private fun scheduleDelayedOff() {
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(ACTION_DELAYED_OFF).setPackage(packageName)
+        val pendingIntent = PendingIntent.getBroadcast(
+            this, 99, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val triggerAtMillis = android.os.SystemClock.elapsedRealtime() + (90 * 60 * 1000)
+
+        alarmManager.setAndAllowWhileIdle(
+            AlarmManager.ELAPSED_REALTIME_WAKEUP,
+            triggerAtMillis,
+            pendingIntent
+        )
+
+        isAlarmActive = true // Mark timer as running
+    }
+
+    private fun cancelDelayedOff() {
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(ACTION_DELAYED_OFF).setPackage(packageName)
+        val pendingIntent = PendingIntent.getBroadcast(
+            this, 99, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        alarmManager.cancel(pendingIntent)
+        pendingIntent.cancel()
+
+        isAlarmActive = false // Mark timer as stopped
+        Log.d("DataSwitchService", "Pending alarm token successfully cleared from system table.")
     }
 
 // --- PURE MEMORY/CACHED HELPERS ---
@@ -597,7 +684,7 @@ class DataSwitchService : Service() {
 
         // 3. Attach it to the notification builder
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentText("ACTIVE - v3.0.6.3 \\ STABLE")
+            .setContentText("ACTIVE - v3.0.7.4 \\ STABLE")
             .setSmallIcon(R.drawable.ic_stat_shiftdata)
             .setContentIntent(pendingIntent) // <--- THIS MAKES IT CLICKABLE
             .setPriority(NotificationCompat.PRIORITY_LOW)
